@@ -6,8 +6,11 @@ GitHub Actions ticket tracker for:
 - August 6, 2026
 - Any released showtime
 
-It sends a Telegram alert when showtimes first appear and again only when
-additional showtimes are detected.
+This version sends a Telegram message on every real run:
+- No qualifying August 6 tickets found
+- Tickets found but showtimes unchanged
+- New showtimes detected
+- Tracker failure
 """
 
 from __future__ import annotations
@@ -70,12 +73,15 @@ def parse_time_to_minutes(value: str) -> int:
     )
     if not match:
         return 10_000
+
     hour, minute = int(match.group(1)), int(match.group(2))
     period = match.group(3).upper()
+
     if period == "AM" and hour == 12:
         hour = 0
     elif period == "PM" and hour != 12:
         hour += 12
+
     return hour * 60 + minute
 
 
@@ -91,6 +97,7 @@ def unique_sorted_times(values: list[str]) -> list[str]:
 def load_state() -> dict[str, Any]:
     if not STATE_FILE.exists():
         return {"detected_times": [], "last_alert_at": None}
+
     try:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
@@ -114,6 +121,7 @@ def send_telegram(message: str) -> None:
         )
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
     response = requests.post(
         url,
         json={
@@ -123,8 +131,10 @@ def send_telegram(message: str) -> None:
         },
         timeout=25,
     )
+
     response.raise_for_status()
     payload = response.json()
+
     if not payload.get("ok"):
         raise RuntimeError(f"Telegram rejected the message: {payload}")
 
@@ -146,9 +156,14 @@ def close_common_popups(page: Page) -> None:
         "Continue",
         "Got It",
     )
+
     for label in labels:
         try:
-            locator = page.get_by_role("button", name=re.compile(f"^{re.escape(label)}$", re.I))
+            locator = page.get_by_role(
+                "button",
+                name=re.compile(f"^{re.escape(label)}$", re.I),
+            )
+
             if locator.count() and locator.first.is_visible():
                 locator.first.click(timeout=1_500)
                 page.wait_for_timeout(500)
@@ -157,11 +172,6 @@ def close_common_popups(page: Page) -> None:
 
 
 def click_target_date(page: Page) -> dict[str, Any]:
-    """
-    Attempts to click August 6. District's date chips can vary, so this tries
-    several exact and contextual text patterns. False is acceptable when the
-    page already opened on August 6.
-    """
     target_date = datetime.strptime(TARGET_DATE_ISO, "%Y-%m-%d")
     day = str(target_date.day)
     day2 = f"{target_date.day:02d}"
@@ -182,12 +192,16 @@ def click_target_date(page: Page) -> dict[str, Any]:
     ]
 
     candidates = page.locator("button, [role=button], a, li")
+
     for index in range(min(candidates.count(), 500)):
         candidate = candidates.nth(index)
+
         try:
             if not candidate.is_visible():
                 continue
+
             text = normalize(candidate.inner_text(timeout=500))
+
             if any(re.fullmatch(pattern, text, re.I) for pattern in patterns):
                 candidate.click(timeout=2_000)
                 page.wait_for_timeout(4_000)
@@ -205,9 +219,11 @@ def scroll_page(page: Page) -> None:
           await new Promise(resolve => {
             let moved = 0;
             const step = 650;
+
             const timer = setInterval(() => {
               window.scrollBy(0, step);
               moved += step;
+
               if (moved >= document.body.scrollHeight + 1000) {
                 clearInterval(timer);
                 window.scrollTo(0, 0);
@@ -223,25 +239,30 @@ def scroll_page(page: Page) -> None:
 
 def extract_theatre_section(body_text: str) -> str:
     lower = body_text.lower()
+
     indexes = [
         lower.find(name)
         for name in TARGET_THEATRE_NAMES
         if lower.find(name) >= 0
     ]
+
     if not indexes:
         return ""
 
     start_index = min(indexes)
     start = max(0, start_index - 350)
 
-    # A generous window is used because District may place amenities and labels
-    # between the cinema name and its showtime buttons.
     return body_text[start : min(len(body_text), start_index + 5_500)]
 
 
 def inspect_page(page: Page) -> dict[str, Any]:
     page.set_viewport_size({"width": 1440, "height": 1200})
-    page.goto(MOVIE_URL, wait_until="domcontentloaded", timeout=45_000)
+
+    page.goto(
+        MOVIE_URL,
+        wait_until="domcontentloaded",
+        timeout=45_000,
+    )
 
     try:
         page.wait_for_load_state("networkidle", timeout=15_000)
@@ -255,6 +276,7 @@ def inspect_page(page: Page) -> dict[str, Any]:
 
     body = visible_text(page)
     lower_body = body.lower()
+
     section = extract_theatre_section(body)
     lower_section = section.lower()
 
@@ -263,6 +285,7 @@ def inspect_page(page: Page) -> dict[str, Any]:
     city_found = "kurnool" in lower_body
 
     target_date = datetime.strptime(TARGET_DATE_ISO, "%Y-%m-%d")
+
     date_variants = (
         target_date.strftime("%-d %b").lower(),
         target_date.strftime("%b %-d").lower(),
@@ -270,7 +293,10 @@ def inspect_page(page: Page) -> dict[str, Any]:
         target_date.strftime("%B %-d").lower(),
         TARGET_DATE_ISO.lower(),
     )
-    date_found = date_click["clicked"] or any(value in lower_body for value in date_variants)
+
+    date_found = date_click["clicked"] or any(
+        value in lower_body for value in date_variants
+    )
 
     show_times = unique_sorted_times(TIME_PATTERN.findall(section))
 
@@ -280,7 +306,10 @@ def inspect_page(page: Page) -> dict[str, Any]:
         "tickets not available",
         "booking not available",
     )
-    unavailable_found = any(text in lower_section for text in unavailable_phrases)
+
+    unavailable_found = any(
+        text in lower_section for text in unavailable_phrases
+    )
 
     blocked_phrases = (
         "access denied",
@@ -288,6 +317,7 @@ def inspect_page(page: Page) -> dict[str, Any]:
         "captcha",
         "unusual traffic",
     )
+
     blocked = any(text in lower_body for text in blocked_phrases)
 
     available = (
@@ -323,23 +353,33 @@ def inspect_page(page: Page) -> dict[str, Any]:
 
 def save_debug(page: Page | None, result: dict[str, Any]) -> None:
     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+
     (DEBUG_DIR / "result.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
     (DEBUG_DIR / "theatre-section.txt").write_text(
         str(result.get("theatre_section_preview", "")),
         encoding="utf-8",
     )
+
     if page is not None:
         try:
-            page.screenshot(path=str(DEBUG_DIR / "page.png"), full_page=True)
+            page.screenshot(
+                path=str(DEBUG_DIR / "page.png"),
+                full_page=True,
+            )
         except Exception as exc:
             log.warning("Unable to save screenshot: %s", exc)
 
 
-def build_alert(result: dict[str, Any], new_times: list[str]) -> str:
+def build_new_ticket_alert(
+    result: dict[str, Any],
+    new_times: list[str],
+) -> str:
     all_times = result["show_times"]
+
     return (
         "🚨 KOREAN KANAKARAJU TICKETS RELEASED!\n\n"
         f"🎬 Movie: {result['movie']}\n"
@@ -348,6 +388,48 @@ def build_alert(result: dict[str, Any], new_times: list[str]) -> str:
         f"🆕 Newly detected showtimes:\n{', '.join(new_times)}\n\n"
         f"🕒 All detected showtimes:\n{', '.join(all_times)}\n\n"
         f"🎟 Book immediately:\n{result['booking_url']}"
+    )
+
+
+def build_no_tickets_message(result: dict[str, Any]) -> str:
+    detected_times = (
+        ", ".join(result["show_times"])
+        if result["show_times"]
+        else "None"
+    )
+
+    checked_time = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+
+    return (
+        "✅ TICKET TRACKER RAN\n\n"
+        "🎬 Korean Kanakaraju\n"
+        "🏢 SVC Cinemas, City Square Mall, Kurnool\n"
+        "📅 Target date: August 6, 2026\n\n"
+        f"Movie found: {result['movie_found']}\n"
+        f"Theatre found: {result['theatre_found']}\n"
+        f"August 6 found: {result['date_found']}\n"
+        f"Detected showtimes: {detected_times}\n\n"
+        "❌ No qualifying August 6 tickets found yet.\n\n"
+        f"Checked at: {checked_time}"
+    )
+
+
+def build_unchanged_message(result: dict[str, Any]) -> str:
+    checked_time = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+
+    return (
+        "✅ TICKET TRACKER RAN\n\n"
+        f"🎬 Movie: {result['movie']}\n"
+        f"🏢 Theatre: {result['theatre']}\n"
+        "📅 Date: August 6, 2026\n\n"
+        "ℹ️ Showtimes are unchanged.\n\n"
+        f"🕒 Current showtimes:\n{', '.join(result['show_times'])}\n\n"
+        f"🎟 Booking link:\n{result['booking_url']}\n\n"
+        f"Checked at: {checked_time}"
     )
 
 
@@ -361,7 +443,10 @@ def main() -> int:
         return 0
 
     state = load_state()
-    previous_times = unique_sorted_times(state.get("detected_times", []))
+    previous_times = unique_sorted_times(
+        state.get("detected_times", [])
+    )
+
     page: Page | None = None
     browser: Browser | None = None
 
@@ -374,6 +459,7 @@ def main() -> int:
                     "--no-sandbox",
                 ],
             )
+
             context = browser.new_context(
                 locale="en-IN",
                 timezone_id="Asia/Kolkata",
@@ -383,6 +469,7 @@ def main() -> int:
                     "Chrome/127.0.0.0 Safari/537.36"
                 ),
             )
+
             page = context.new_page()
             result = inspect_page(page)
             save_debug(page, result)
@@ -394,30 +481,43 @@ def main() -> int:
             log.info("Available: %s", result["available"])
 
             if not result["available"]:
-                log.info("No qualifying August 6 SVC showtimes detected.")
+                message = build_no_tickets_message(result)
+                send_telegram(message)
+                log.info("No-ticket status Telegram message sent.")
                 return 0
 
             new_times = [
-                time for time in result["show_times"]
+                time
+                for time in result["show_times"]
                 if time not in previous_times
             ]
 
             if not new_times:
-                log.info("Showtimes are unchanged; no duplicate alert sent.")
+                message = build_unchanged_message(result)
+                send_telegram(message)
+                log.info("Duplicate-status Telegram alert sent.")
                 return 0
 
-            message = build_alert(result, new_times)
+            message = build_new_ticket_alert(result, new_times)
             send_telegram(message)
 
             state.update(
                 {
                     "detected_times": result["show_times"],
-                    "last_alert_at": datetime.now(timezone.utc).isoformat(),
+                    "last_alert_at": datetime.now(
+                        timezone.utc
+                    ).isoformat(),
                     "last_booking_url": result["booking_url"],
                 }
             )
+
             save_state(state)
-            log.info("Telegram alert sent for new showtimes: %s", new_times)
+
+            log.info(
+                "Telegram ticket alert sent for new showtimes: %s",
+                new_times,
+            )
+
             return 0
 
     except Exception as exc:
@@ -427,10 +527,23 @@ def main() -> int:
             "error": f"{type(exc).__name__}: {exc}",
             "checked_at": datetime.now(timezone.utc).isoformat(),
         }
+
         log.exception("Tracker failed")
         save_debug(page, error_result)
-        # Fail the workflow so GitHub visibly marks the run as failed.
+
+        try:
+            send_telegram(
+                "⚠️ TICKET TRACKER FAILED\n\n"
+                f"Error: {type(exc).__name__}: {exc}\n\n"
+                "GitHub will try again on the next scheduled run."
+            )
+        except Exception:
+            log.exception(
+                "Could not send failure notification to Telegram."
+            )
+
         return 1
+
     finally:
         if browser is not None:
             try:
