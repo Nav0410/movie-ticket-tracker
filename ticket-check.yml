@@ -1,0 +1,77 @@
+name: Korean Kanakaraju Ticket Tracker
+
+on:
+  schedule:
+    # GitHub's shortest supported scheduled interval is 5 minutes.
+    - cron: "*/5 * * * *"
+
+  # Allows you to test it manually from the Actions tab.
+  workflow_dispatch:
+    inputs:
+      telegram_test:
+        description: "Send only a Telegram test message"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: korean-kanakaraju-ticket-tracker
+  cancel-in-progress: false
+
+jobs:
+  check-tickets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+
+    env:
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TARGET_DATE: "2026-08-06"
+      MOVIE_URL: "https://www.district.in/movies/korean-kanakaraju-movie-tickets-in-kurnool-MV213660"
+      TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.telegram_test || false }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Restore previous detected showtimes
+        uses: actions/cache/restore@v4
+        with:
+          path: state/ticket_state.json
+          key: ticket-state-${{ github.run_id }}
+          restore-keys: |
+            ticket-state-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Install Chromium and operating-system dependencies
+        run: python -m playwright install --with-deps chromium
+
+      - name: Check tickets
+        run: python tracker.py
+
+      - name: Save updated showtime state
+        if: always() && hashFiles('state/ticket_state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: state/ticket_state.json
+          key: ticket-state-${{ github.run_id }}
+
+      - name: Upload diagnostics when the check fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticket-tracker-debug-${{ github.run_id }}
+          path: debug/
+          if-no-files-found: ignore
+          retention-days: 3
