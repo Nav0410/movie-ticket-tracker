@@ -4,7 +4,7 @@ on:
   schedule:
     # Runs approximately every 5 minutes.
     # Using minute 2 avoids the busiest start-of-hour period.
-    - cron: "2-59/5 * * * *"
+    - cron: "2/5 * * * *"
 
   # Allows manual testing from the GitHub Actions page.
   workflow_dispatch:
@@ -34,7 +34,7 @@ jobs:
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-      TARGET_DATE: "2026-08-06"
+      TARGET_DATE: "2026-08-07"
 
       MOVIE_URL: "https://www.district.in/movies/korean-kanakaraju-movie-tickets-in-kurnool-MV213660"
 
