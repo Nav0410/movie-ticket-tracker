@@ -34,7 +34,7 @@ jobs:
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-      TARGET_DATE: "2026-08-06"
+      TARGET_DATE: "2026-08-08"
 
       MOVIE_URL: "https://www.district.in/movies/korean-kanakaraju-movie-tickets-in-kurnool-MV213660"
 
