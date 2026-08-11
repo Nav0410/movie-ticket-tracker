@@ -1,12 +1,6 @@
-name: Korean Kanakaraju Ticket Tracker
+name: Vishwanath & Sons Ticket Tracker
 
 on:
-  schedule:
-    # Runs approximately every 5 minutes.
-    # Using minute 2 avoids the busiest start-of-hour period.
-    -  cron: "*/5 * * * *"
-
-  # Allows manual testing from the GitHub Actions page.
   workflow_dispatch:
     inputs:
       telegram_test:
@@ -15,74 +9,83 @@ on:
         default: false
         type: boolean
 
+  # Fallback only. GitHub scheduled runs can be delayed.
+  schedule:
+    - cron: "*/5 * * * *"
+
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
-  group: korean-kanakaraju-ticket-tracker
+  group: vishwanath-sons-ticket-tracker
   cancel-in-progress: false
 
 jobs:
   check-tickets:
     runs-on: ubuntu-latest
-
-    # Increased from 4 minutes because Chromium installation
-    # can sometimes take longer on GitHub's servers.
     timeout-minutes: 10
 
     env:
+      MOVIE_URL: "https://www.district.in/movies/vishwanath-and-sons-movie-tickets-in-kurnool-MV216343"
+      TARGET_DATE: "2026-08-14"
+      STATE_FILE: "state/ticket_state.json"
+      DEBUG_DIR: "debug"
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-      TARGET_DATE: "2026-08-08"
-
-      MOVIE_URL: "https://www.district.in/movies/korean-kanakaraju-movie-tickets-in-kurnool-MV213660"
-
-      TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.telegram_test == true }}
+      TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.telegram_test && 'true' || 'false' }}
 
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Restore previously detected showtimes
-        uses: actions/cache/restore@v4
         with:
-          path: state/ticket_state.json
-          key: ticket-state-${{ github.run_id }}
-          restore-keys: |
-            ticket-state-
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
+          cache: "pip"
 
-      - name: Install Python packages
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests playwright
 
-      - name: Install Chromium and system dependencies
+      - name: Install Chromium for Playwright
         run: |
           python -m playwright install --with-deps chromium
 
-      - name: Check tickets
+      - name: Run Vishwanath & Sons ticket tracker
         run: |
           python tracker.py
 
-      - name: Save updated showtime state
-        if: always() && hashFiles('state/ticket_state.json') != ''
-        uses: actions/cache/save@v4
-        with:
-          path: state/ticket_state.json
-          key: ticket-state-${{ github.run_id }}
-
-      - name: Upload diagnostics when check fails
-        if: failure()
+      - name: Upload debug files
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ticket-tracker-debug-${{ github.run_id }}
+          name: ticket-tracker-debug-${{ github.run_number }}
           path: debug/
           if-no-files-found: ignore
           retention-days: 3
+
+      - name: Save ticket state
+        if: success() && env.TEST_MODE != 'true'
+        run: |
+          if [ ! -f state/ticket_state.json ]; then
+            echo "No state file to save."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add state/ticket_state.json
+
+          if git diff --cached --quiet; then
+            echo "Ticket state unchanged."
+            exit 0
+          fi
+
+          git commit -m "Update Vishwanath & Sons ticket state [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
