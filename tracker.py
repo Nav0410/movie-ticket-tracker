@@ -1,4 +1,21 @@
 #!/usr/bin/env python3
+"""
+STRICT BookMyShow tracker for:
+- Vishwanath and Sons
+- ALLU Cinemas: Kokapet, Hyderabad
+- August 15, 2026
+
+Telegram is sent ONLY when:
+1) BookMyShow page is not blocked/challenged
+2) the exact target movie is found
+3) the date URL is August 15, 2026
+4) showtime-like controls are found INSIDE the same movie card/container
+5) those showtime controls are clickable/bookable elements (button/a/[role=button])
+
+This avoids the previous false positive where unrelated times elsewhere on the
+page were picked up.
+"""
+
 from __future__ import annotations
 
 import json
@@ -11,12 +28,13 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from playwright.sync_api import Browser, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+from playwright.sync_api import Browser, Locator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 TARGET_DATE = os.getenv("TARGET_DATE", "2026-08-15").strip()
 CINEMA_URL = os.getenv(
     "MOVIE_URL",
-    "https://in.bookmyshow.com/cinemas/hyderabad/allu-cinemas-kokapet/buytickets/ALUC/20260815",
+    "https://in.bookmyshow.com/cinemas/hyderabad/"
+    "allu-cinemas-kokapet/buytickets/ALUC/20260815",
 ).strip()
 
 TARGET_MOVIE_NAMES = (
@@ -34,11 +52,12 @@ TARGET_THEATRE_NAMES = (
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
 STATE_FILE = Path(os.getenv("STATE_FILE", "state/ticket_state.json"))
 DEBUG_DIR = Path(os.getenv("DEBUG_DIR", "debug"))
 
 TIME_PATTERN = re.compile(
-    r"\b(?:0?[1-9]|1[0-2])(?::[0-5]\d)\s*(?:AM|PM)\b",
+    r"^(?:0?[1-9]|1[0-2])(?::[0-5]\d)\s*(?:AM|PM)$",
     re.IGNORECASE,
 )
 
@@ -52,20 +71,11 @@ BLOCKED_PHRASES = (
     "unusual traffic",
 )
 
-NO_SHOW_PHRASES = (
-    "no shows available",
-    "no showtimes",
-    "showtimes unavailable",
-    "tickets not available",
-    "booking not available",
-    "booking opens soon",
-)
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("vishwanath-allu-bookmyshow")
+log = logging.getLogger("vishwanath-allu-bookmyshow-strict")
 
 
 def normalize(value: str) -> str:
@@ -73,16 +83,23 @@ def normalize(value: str) -> str:
 
 
 def parse_time_to_minutes(value: str) -> int:
-    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*(AM|PM)\s*", value, re.I)
+    m = re.fullmatch(
+        r"\s*(\d{1,2}):(\d{2})\s*(AM|PM)\s*",
+        value,
+        re.IGNORECASE,
+    )
     if not m:
         return 10_000
+
     hour = int(m.group(1))
     minute = int(m.group(2))
     period = m.group(3).upper()
+
     if period == "AM" and hour == 12:
         hour = 0
     elif period == "PM" and hour != 12:
         hour += 12
+
     return hour * 60 + minute
 
 
@@ -97,11 +114,20 @@ def unique_sorted_times(values: list[str]) -> list[str]:
 
 def load_state() -> dict[str, Any]:
     if not STATE_FILE.exists():
-        return {"detected_times": [], "alert_sent": False}
+        return {
+            "target": "vishwanath-and-sons|ALUC|2026-08-15",
+            "detected_times": [],
+            "alert_sent": False,
+        }
+
     try:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return {"detected_times": [], "alert_sent": False}
+        return {
+            "target": "vishwanath-and-sons|ALUC|2026-08-15",
+            "detected_times": [],
+            "alert_sent": False,
+        }
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -134,68 +160,136 @@ def send_telegram(message: str) -> None:
 
 def close_common_popups(page: Page) -> None:
     for label in (
-        "Allow",
-        "Not Now",
-        "No Thanks",
-        "Skip",
-        "Close",
-        "Maybe Later",
-        "Accept",
-        "Accept All",
-        "Continue",
-        "Got It",
+        "Allow", "Not Now", "No Thanks", "Skip", "Close",
+        "Maybe Later", "Accept", "Accept All", "Continue", "Got It",
     ):
         try:
-            locator = page.get_by_role("button", name=re.compile(f"^{re.escape(label)}$", re.I))
+            locator = page.get_by_role(
+                "button",
+                name=re.compile(f"^{re.escape(label)}$", re.I),
+            )
             if locator.count() and locator.first.is_visible():
-                locator.first.click(timeout=1500)
-                page.wait_for_timeout(400)
+                locator.first.click(timeout=1200)
+                page.wait_for_timeout(300)
         except Exception:
             pass
-
-
-def scroll_page(page: Page) -> None:
-    page.evaluate(
-        """
-        async () => {
-          await new Promise(resolve => {
-            let moved = 0;
-            const step = 700;
-            const timer = setInterval(() => {
-              window.scrollBy(0, step);
-              moved += step;
-              if (moved >= document.body.scrollHeight + 1000) {
-                clearInterval(timer);
-                window.scrollTo(0, 0);
-                resolve();
-              }
-            }, 180);
-          });
-        }
-        """
-    )
-    page.wait_for_timeout(1500)
 
 
 def visible_text(page: Page) -> str:
     return normalize(page.locator("body").inner_text(timeout=15_000))
 
 
-def extract_target_context(body: str) -> str:
+def page_is_blocked(page: Page, body: str) -> bool:
+    title = normalize(page.title()).lower()
     lower = body.lower()
-    positions = []
+    return any(x in title or x in lower for x in BLOCKED_PHRASES)
 
-    for name in TARGET_MOVIE_NAMES + TARGET_THEATRE_NAMES:
-        idx = lower.find(name)
-        if idx >= 0:
-            positions.append(idx)
 
-    if not positions:
-        return ""
+def exact_movie_locator(page: Page) -> Locator:
+    """
+    Find visible elements whose text is exactly (or almost exactly) the target
+    movie name. This is intentionally strict so recommendations/metadata do not
+    cause a ticket-release alert.
+    """
+    selectors = []
 
-    start = max(0, min(positions) - 1500)
-    end = min(len(body), max(positions) + 8000)
-    return body[start:end]
+    for name in TARGET_MOVIE_NAMES:
+        selectors.append(
+            page.get_by_text(
+                re.compile(rf"^\s*{re.escape(name)}\s*$", re.I)
+            )
+        )
+
+    # Merge by picking first selector with visible matches.
+    for locator in selectors:
+        try:
+            count = min(locator.count(), 20)
+            for i in range(count):
+                item = locator.nth(i)
+                if item.is_visible():
+                    return item
+        except Exception:
+            continue
+
+    return page.locator("__bookmyshow_target_movie_not_found__")
+
+
+def find_movie_container(movie_node: Locator) -> Locator | None:
+    """
+    Walk upward from exact movie title and choose the smallest ancestor that
+    contains BOTH the movie title and at least one time-like clickable control.
+    """
+    for level in range(1, 9):
+        try:
+            container = movie_node.locator(f"xpath=ancestor::*[{level}]")
+
+            if not container.count():
+                continue
+
+            text = normalize(container.first.inner_text(timeout=1200))
+            lower = text.lower()
+
+            if not any(name in lower for name in TARGET_MOVIE_NAMES):
+                continue
+
+            clickable = container.first.locator(
+                "button, a, [role='button']"
+            )
+
+            clickable_count = min(clickable.count(), 150)
+
+            for i in range(clickable_count):
+                try:
+                    txt = normalize(clickable.nth(i).inner_text(timeout=400))
+                    if TIME_PATTERN.fullmatch(txt):
+                        return container.first
+                except Exception:
+                    continue
+
+        except Exception:
+            continue
+
+    return None
+
+
+def extract_clickable_showtimes(container: Locator) -> list[str]:
+    """
+    Only accepts showtimes from clickable elements inside the target movie
+    container. Plain text times elsewhere are ignored.
+    """
+    values: list[str] = []
+
+    clickable = container.locator(
+        "button, a, [role='button']"
+    )
+
+    count = min(clickable.count(), 250)
+
+    for i in range(count):
+        item = clickable.nth(i)
+
+        try:
+            if not item.is_visible():
+                continue
+
+            text = normalize(item.inner_text(timeout=500))
+
+            if not TIME_PATTERN.fullmatch(text):
+                continue
+
+            # Do not count disabled controls as released/bookable.
+            disabled = item.get_attribute("disabled") is not None
+            aria_disabled = (item.get_attribute("aria-disabled") or "").lower() == "true"
+
+            if disabled or aria_disabled:
+                continue
+
+            values.append(text)
+
+        except Exception:
+            continue
+
+    return unique_sorted_times(values)
 
 
 def inspect_page(page: Page) -> dict[str, Any]:
@@ -214,53 +308,53 @@ def inspect_page(page: Page) -> dict[str, Any]:
 
     page.wait_for_timeout(4000)
     close_common_popups(page)
-    scroll_page(page)
 
     body = visible_text(page)
     lower = body.lower()
-    title = normalize(page.title()).lower()
 
-    blocked = any(
-        phrase in title or phrase in lower
-        for phrase in BLOCKED_PHRASES
+    blocked = page_is_blocked(page, body)
+
+    date_found = (
+        "20260815" in page.url
+        or "2026-08-15" in lower
+        or "15 aug" in lower
+        or "aug 15" in lower
+        or "15 august" in lower
+        or "august 15" in lower
     )
 
-    movie_found = any(name in lower for name in TARGET_MOVIE_NAMES)
-    theatre_found = any(name in lower for name in TARGET_THEATRE_NAMES)
-
-    if "/aluc/" in page.url.lower():
-        theatre_found = True
-
-    date_found = "20260815" in page.url or any(
-        value in lower
-        for value in (
-            "15 aug",
-            "aug 15",
-            "15 august",
-            "august 15",
-            "2026-08-15",
-        )
+    theatre_found = (
+        "/aluc/" in page.url.lower()
+        and any(name in lower for name in TARGET_THEATRE_NAMES)
     )
 
-    context = extract_target_context(body)
-    search_area = context if context else body
+    movie_node = exact_movie_locator(page)
+    movie_found = False
+    movie_container_found = False
+    show_times: list[str] = []
 
-    show_times = unique_sorted_times(
-        TIME_PATTERN.findall(search_area)
-    )
+    if movie_node.count():
+        try:
+            movie_found = movie_node.first.is_visible()
+        except Exception:
+            movie_found = False
 
-    unavailable_found = any(
-        phrase in search_area.lower()
-        for phrase in NO_SHOW_PHRASES
-    )
+    if movie_found:
+        container = find_movie_container(movie_node.first)
+        if container is not None:
+            movie_container_found = True
+            show_times = extract_clickable_showtimes(container)
 
+    # STRICT RULE:
+    # no alert unless exact target movie + exact theatre + exact date +
+    # clickable showtimes inside the target movie's own container.
     available = (
-        movie_found
+        not blocked
+        and movie_found
+        and movie_container_found
         and theatre_found
         and date_found
         and bool(show_times)
-        and not unavailable_found
-        and not blocked
     )
 
     return {
@@ -270,15 +364,14 @@ def inspect_page(page: Page) -> dict[str, Any]:
         "theatre": "ALLU Cinemas: Kokapet, Hyderabad",
         "target_date": TARGET_DATE,
         "movie_found": movie_found,
+        "movie_container_found": movie_container_found,
         "theatre_found": theatre_found,
         "date_found": date_found,
         "show_times": show_times,
-        "unavailable_found": unavailable_found,
         "blocked": blocked,
         "booking_url": page.url or CINEMA_URL,
         "page_title": page.title(),
         "checked_at": datetime.now(timezone.utc).isoformat(),
-        "context_preview": context[:4000],
     }
 
 
@@ -290,12 +383,15 @@ def save_debug(page: Page | None, result: dict[str, Any]) -> None:
         encoding="utf-8",
     )
 
-    (DEBUG_DIR / "context-preview.txt").write_text(
-        str(result.get("context_preview", "")),
-        encoding="utf-8",
-    )
-
     if page is not None:
+        try:
+            (DEBUG_DIR / "body.txt").write_text(
+                visible_text(page)[:100_000],
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
         try:
             page.screenshot(
                 path=str(DEBUG_DIR / "page.png"),
@@ -311,7 +407,7 @@ def build_ticket_alert(result: dict[str, Any], times: list[str]) -> str:
         "🎬 Movie: Vishwanath and Sons\n"
         "🏢 Cinema: ALLU Cinemas: Kokapet, Hyderabad\n"
         "📅 Date: Saturday, August 15, 2026\n\n"
-        f"🕒 Detected showtimes:\n{', '.join(times)}\n\n"
+        f"🕒 Bookable showtimes:\n{', '.join(times)}\n\n"
         "🎟 Book on BookMyShow:\n"
         f"{result['booking_url']}"
     )
@@ -347,23 +443,18 @@ def main() -> int:
             save_debug(page, result)
 
             log.info("Movie found: %s", result["movie_found"])
+            log.info("Movie container found: %s", result["movie_container_found"])
             log.info("Theatre found: %s", result["theatre_found"])
             log.info("Target date found: %s", result["date_found"])
-            log.info("Detected showtimes: %s", result["show_times"])
+            log.info("Detected BOOKABLE showtimes: %s", result["show_times"])
             log.info("Tickets available: %s", result["available"])
             log.info("Blocked: %s", result["blocked"])
 
-            # User requested Telegram only when tickets are released.
             if not result["available"]:
-                if result["blocked"]:
-                    log.warning(
-                        "BookMyShow returned a challenge/block page. "
-                        "No Telegram alert sent."
-                    )
-                else:
-                    log.info(
-                        "No qualifying tickets yet. No Telegram alert sent."
-                    )
+                log.info(
+                    "No confirmed bookable Vishwanath and Sons showtimes "
+                    "for Aug 15 at ALLU Cinemas. No Telegram alert sent."
+                )
                 return 0
 
             current_times = unique_sorted_times(result["show_times"])
@@ -372,7 +463,8 @@ def main() -> int:
             )
 
             new_times = [
-                t for t in current_times if t not in previous_times
+                t for t in current_times
+                if t not in previous_times
             ]
 
             if not state.get("alert_sent"):
@@ -381,7 +473,7 @@ def main() -> int:
                 alert_times = new_times
             else:
                 log.info(
-                    "Tickets already known and showtimes unchanged. "
+                    "Bookable tickets already known and showtimes unchanged. "
                     "No Telegram alert sent."
                 )
                 return 0
@@ -395,6 +487,7 @@ def main() -> int:
 
             state.update(
                 {
+                    "target": "vishwanath-and-sons|ALUC|2026-08-15",
                     "alert_sent": True,
                     "detected_times": current_times,
                     "last_alert_at": datetime.now(timezone.utc).isoformat(),
@@ -419,7 +512,7 @@ def main() -> int:
             },
         )
 
-        # No Telegram error messages by design.
+        # User requested Telegram only for ticket release.
         return 1
 
     finally:
