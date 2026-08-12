@@ -1,4 +1,4 @@
-name: Vishwanath & Sons Ticket Tracker
+name: Vishwanath and Sons - ALLU Cinemas Ticket Tracker
 
 on:
   workflow_dispatch:
@@ -9,7 +9,8 @@ on:
         default: false
         type: boolean
 
-  # Fallback only. GitHub scheduled runs can be delayed.
+  # GitHub Actions cron is best-effort and can be delayed.
+  # Keep this as a fallback, or trigger workflow_dispatch externally every 5 minutes.
   schedule:
     - cron: "*/5 * * * *"
 
@@ -17,7 +18,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: vishwanath-sons-ticket-tracker
+  group: vishwanath-sons-allu-cinemas-tracker
   cancel-in-progress: false
 
 jobs:
@@ -26,8 +27,8 @@ jobs:
     timeout-minutes: 10
 
     env:
-      MOVIE_URL: "https://www.district.in/movies/vishwanath-and-sons-movie-tickets-in-kurnool-MV216343"
-      TARGET_DATE: "2026-08-14"
+      MOVIE_URL: "https://in.bookmyshow.com/cinemas/hyderabad/allu-cinemas-kokapet/buytickets/ALUC/20260815"
+      TARGET_DATE: "2026-08-15"
       STATE_FILE: "state/ticket_state.json"
       DEBUG_DIR: "debug"
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -49,13 +50,13 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests playwright
+          pip install -r requirements.txt
 
       - name: Install Chromium for Playwright
         run: |
           python -m playwright install --with-deps chromium
 
-      - name: Run Vishwanath & Sons ticket tracker
+      - name: Check BookMyShow for Vishwanath and Sons
         run: |
           python tracker.py
 
@@ -72,13 +73,12 @@ jobs:
         if: success() && env.TEST_MODE != 'true'
         run: |
           if [ ! -f state/ticket_state.json ]; then
-            echo "No state file to save."
+            echo "No state change to save."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add state/ticket_state.json
 
           if git diff --cached --quiet; then
@@ -86,6 +86,6 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Update Vishwanath & Sons ticket state [skip ci]"
+          git commit -m "Update ALLU Cinemas ticket state [skip ci]"
           git pull --rebase origin main
           git push origin HEAD:main
