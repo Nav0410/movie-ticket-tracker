@@ -2,15 +2,9 @@ name: Vishwanath and Sons - ALLU Cinemas Ticket Tracker
 
 on:
   workflow_dispatch:
-    inputs:
-      telegram_test:
-        description: "Send only a Telegram test message"
-        required: false
-        default: false
-        type: boolean
 
-  # GitHub Actions cron is best-effort and can be delayed.
-  # Keep this as a fallback, or trigger workflow_dispatch externally every 5 minutes.
+  # GitHub fallback schedule.
+  # GitHub may delay scheduled jobs, so this is not guaranteed exactly every 5 min.
   schedule:
     - cron: "*/5 * * * *"
 
@@ -18,28 +12,38 @@ permissions:
   contents: write
 
 concurrency:
-  group: vishwanath-sons-allu-cinemas-tracker
+  group: vishwanath-sons-allu-cinemas-ticket-tracker
   cancel-in-progress: false
 
 jobs:
   check-tickets:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     env:
       MOVIE_URL: "https://in.bookmyshow.com/cinemas/hyderabad/allu-cinemas-kokapet/buytickets/ALUC/20260815"
+      BMS_MOVIE_URL: "https://in.bookmyshow.com/movies/hyderabad/vishwanath-and-sons/"
       TARGET_DATE: "2026-08-15"
+
       STATE_FILE: "state/ticket_state.json"
       DEBUG_DIR: "debug"
+
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.telegram_test && 'true' || 'false' }}
 
     steps:
+      # ------------------------------------------------------
+      # 1. Download repository
+      # ------------------------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # ------------------------------------------------------
+      # 2. Python
+      # ------------------------------------------------------
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -47,18 +51,29 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      # ------------------------------------------------------
+      # 3. Install dependencies
+      #
+      # NO PLAYWRIGHT
+      # NO CHROMIUM
+      # ------------------------------------------------------
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Chromium for Playwright
-        run: |
-          python -m playwright install --with-deps chromium
+      # ------------------------------------------------------
+      # 4. Run ticket checker
+      # ------------------------------------------------------
 
       - name: Check BookMyShow for Vishwanath and Sons
         run: |
           python tracker.py
+
+      # ------------------------------------------------------
+      # 5. Upload debug information
+      # ------------------------------------------------------
 
       - name: Upload debug files
         if: always()
@@ -69,16 +84,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      # ------------------------------------------------------
+      # 6. Save state only if tracker changed it
+      # ------------------------------------------------------
+
       - name: Save ticket state
-        if: success() && env.TEST_MODE != 'true'
+        if: success()
         run: |
           if [ ! -f state/ticket_state.json ]; then
-            echo "No state change to save."
+            echo "No ticket state file created."
+            echo "This is normal when tickets have not been detected."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add state/ticket_state.json
 
           if git diff --cached --quiet; then
@@ -86,6 +107,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Update ALLU Cinemas ticket state [skip ci]"
+          git commit -m "Update Vishwanath and Sons ticket state [skip ci]"
+
           git pull --rebase origin main
           git push origin HEAD:main
